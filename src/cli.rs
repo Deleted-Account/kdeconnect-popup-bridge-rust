@@ -34,6 +34,8 @@ kdeconnect-popup-bridge —— 让手机通知的每一条都在 KDE 桌面弹�
 
 配置文件:
   ~/.config/kdeconnect-popup-bridge/sounds.json（可用环境变量 KC_BRIDGE_CONFIG 覆盖）
+  环境变量 KC_BRIDGE_DETECT_WAIT 控制等待手机上线的策略：默认一直等到手机连上；
+  写秒数则限时等待；写 0 或 never 则不等待（探测不到就退出）。
   兼容字符串写法 { \"apps\": { \"WeChat\": \"/a.ogg\" }, \"default\": \"\" }，
   也支持对象写法 { \"sound\": \"...\", \"timeout\": 15, \"urgency\": \"critical\", \"enabled\": false }。
 ";

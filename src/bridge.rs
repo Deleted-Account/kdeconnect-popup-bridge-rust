@@ -288,8 +288,8 @@ impl Bridge {
         conn.add_match(MATCH_RULE)?;
 
         let devices = if devices_override.is_empty() {
-            // 显式 --device 时不重试：用户已指定目标，等下去没有意义
-            detect_devices_waiting(DETECT_WAIT)?
+            // 未给 --device 时一直等到手机上线；显式指定则直接用，不必等待
+            detect_devices_waiting(DetectWait::from_env())?
         } else {
             devices_override
         };
@@ -625,35 +625,90 @@ pub fn detect_devices() -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// 探测设备失败后最长重试多久
-///
-/// 开机时 XDG autostart 与 `kdeconnectd` 是并行启动的：本程序常常先跑起来，
-/// 此时守护进程还没完成设备握手，`detect_devices()` 只会拿到空列表，
-/// 于是直接以退出码 1 结束 —— 这正是「死机重启后通知补弹没起来」的根因。
-pub const DETECT_WAIT: Duration = Duration::from_secs(60);
-/// 上述重试的间隔
+/// 探测设备的重试间隔
 pub const DETECT_INTERVAL: Duration = Duration::from_secs(2);
+/// 无限等待时每隔多久汇报一次「还在等」—— 既免得日志刷屏，也便于确认进程没卡死
+pub const DETECT_HEARTBEAT: Duration = Duration::from_secs(30);
 
-/// 反复调用 [`detect_devices`]，直到手机上线或超过 `timeout`。
+/// 等手机上线的策略
 ///
-/// `timeout` 为 0 时不重试，等价于直接调用 [`detect_devices`]。
-pub fn detect_devices_waiting(timeout: Duration) -> Result<Vec<String>> {
+/// 开机时 XDG autostart 与 `kdeconnectd` 是并行启动的，本程序常常先跑起来，
+/// 此时守护进程还没完成设备握手、手机也可能还没连上同一个 Wi-Fi，
+/// `detect_devices()` 只拿得到空列表。若就此退出，之后手机再连上也没人补弹了 ——
+/// 这正是「重启后通知补弹失效」的根因。所以默认是**一直等**，而非给一个时限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectWait {
+    /// 一直重试到设备出现（默认）
+    Forever,
+    /// 只探测一次，失败立即返回错误（脚本/测试要快速失败时用）
+    Once,
+    /// 最多等这么久
+    Limited(Duration),
+}
+
+impl DetectWait {
+    /// 按环境变量 `KC_BRIDGE_DETECT_WAIT` 决定策略，未设置或无法识别时取 [`Self::Forever`]
+    pub fn from_env() -> Self {
+        let Ok(raw) = std::env::var("KC_BRIDGE_DETECT_WAIT") else {
+            return DetectWait::Forever;
+        };
+        Self::parse(raw.trim())
+    }
+
+    /// 解析 `from_env` 的取值：
+    /// `forever`/`always`/`-1`/空 → 一直等；`0`/`never`/`none` → 不等；其余按秒数
+    pub fn parse(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "" | "forever" | "always" | "infinite" | "-1" => DetectWait::Forever,
+            "0" | "never" | "none" | "off" => DetectWait::Once,
+            other => match other.parse::<u64>() {
+                Ok(secs) => DetectWait::Limited(Duration::from_secs(secs)),
+                Err(_) => {
+                    eprintln!("[警告] KC_BRIDGE_DETECT_WAIT 不是秒数或 forever/never（{raw}），改为一直等待");
+                    DetectWait::Forever
+                }
+            },
+        }
+    }
+}
+
+/// 反复调用 [`detect_devices`]，直到手机上线；策略见 [`DetectWait`]。
+pub fn detect_devices_waiting(wait: DetectWait) -> Result<Vec<String>> {
     let mut waited = Duration::ZERO;
+    let mut since_log = Duration::ZERO;
     loop {
         let err = match detect_devices() {
-            Ok(ids) => return Ok(ids),
+            Ok(ids) => {
+                if waited > Duration::ZERO {
+                    eprintln!("[就绪] 发现设备，共等待 {}s", waited.as_secs());
+                }
+                return Ok(ids);
+            }
             Err(e) => e,
         };
-        if waited >= timeout {
+        // 不等，或已到时限 —— 把最后一次探测的错误交还调用方
+        if matches!(wait, DetectWait::Once)
+            || matches!(wait, DetectWait::Limited(limit) if waited >= limit)
+        {
             return Err(err);
         }
         if waited == Duration::ZERO {
-            eprintln!(
-                "[等待] 尚未发现已配对且在线的设备（kdeconnectd 可能还在初始化），\
-                 每 {}s 重试一次，最多等待 {}s",
-                DETECT_INTERVAL.as_secs(),
-                timeout.as_secs()
-            );
+            match wait {
+                DetectWait::Forever => eprintln!(
+                    "[等待] 尚未发现已配对且在线的设备，每 {}s 重试；\
+                     会一直等到手机上线（也可用 --device 直接指定）",
+                    DETECT_INTERVAL.as_secs()
+                ),
+                DetectWait::Limited(limit) => eprintln!(
+                    "[等待] 尚未发现已配对且在线的设备，每 {}s 重试，最多等待 {}s",
+                    DETECT_INTERVAL.as_secs(),
+                    limit.as_secs()
+                ),
+                DetectWait::Once => unreachable!("Once 已在上面返回"),
+            }
+        } else if waited - since_log >= DETECT_HEARTBEAT {
+            eprintln!("[等待] 已等待 {}s，仍在等设备上线…", waited.as_secs());
+            since_log = waited;
         }
         std::thread::sleep(DETECT_INTERVAL);
         waited += DETECT_INTERVAL;
@@ -663,6 +718,26 @@ pub fn detect_devices_waiting(timeout: Duration) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_wait_parsing() {
+        // 默认与「希望一直等」的写法
+        assert_eq!(DetectWait::parse(""), DetectWait::Forever);
+        assert_eq!(DetectWait::parse("forever"), DetectWait::Forever);
+        assert_eq!(DetectWait::parse("Always"), DetectWait::Forever);
+        assert_eq!(DetectWait::parse("-1"), DetectWait::Forever);
+        // 不想等的写法
+        assert_eq!(DetectWait::parse("0"), DetectWait::Once);
+        assert_eq!(DetectWait::parse("never"), DetectWait::Once);
+        assert_eq!(DetectWait::parse("None"), DetectWait::Once);
+        // 限时
+        assert_eq!(
+            DetectWait::parse("60"),
+            DetectWait::Limited(Duration::from_secs(60))
+        );
+        // 认不出来的值宁可多等，也不要因为解析失败而错失手机上线
+        assert_eq!(DetectWait::parse("abc"), DetectWait::Forever);
+    }
 
     #[test]
     fn posted_without_all_only_sounds() {

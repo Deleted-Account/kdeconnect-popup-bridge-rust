@@ -127,6 +127,34 @@ X-DBUS-StartupType=unique
 > `--all` depends on the session bus, so start it inside the KDE session (autostart, or
 > after login). Don't put it in an early systemd `--user` unit.
 
+### The phone isn't online yet? Nothing is lost
+
+Autostart races both `kdeconnectd` and your network, so the bridge routinely starts
+before any device is reachable — the daemon hasn't finished its handshake, or the phone
+hasn't joined the same Wi-Fi yet. It therefore does **not** give up on an empty device
+list: it retries every 2s until a paired, reachable device shows up, then attaches to it.
+Take ten minutes to connect your phone and it still starts working the moment you do.
+
+Tune this with `KC_BRIDGE_DETECT_WAIT`:
+
+| Value | Behaviour |
+|---|---|
+| unset / `forever` / `always` | keep retrying (default) |
+| `0` / `never` | probe once, then exit — useful for scripts that want a fast, explicit failure |
+| `<seconds>` | retry for at most that long |
+
+Passing `--device` skips detection entirely, so no waiting happens either way.
+
+XDG autostart units are generated with `Restart=no`, meaning any non-zero exit leaves the
+bridge dead until you restart it by hand. A drop-in makes it self-healing:
+
+```ini
+# ~/.config/systemd/user/app-kdeconnect\x2dpopup\x2dbridge@autostart.service.d/restart.conf
+[Service]
+Restart=on-failure
+RestartSec=20
+```
+
 ## Sound rules
 
 Config file: `~/.config/kdeconnect-popup-bridge/sounds.json`

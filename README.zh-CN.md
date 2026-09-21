@@ -106,6 +106,33 @@ X-DBUS-StartupType=unique
 
 > 注意：`--all` 模式依赖会话总线，务必在 KDE 会话内启动（自启动或登录后再跑），不要放进 systemd --user 的早期阶段。
 
+### 手机还没连上？照样会等到它上线
+
+自启动时本程序要和 `kdeconnectd`、也要和网络抢时间，经常比它们先跑起来：守护进程还没完成设备握手，
+或者手机还没接进同一个 Wi-Fi，此刻探测设备必然拿到空列表。
+因此**不会因为一时探测不到就退出** —— 它会每 2s 重试一次，直到出现「已配对且在线」的设备再挂上去。
+哪怕你十分钟之后才把手机连上，它也是从那一刻起照常工作。
+
+可用 `KC_BRIDGE_DETECT_WAIT` 调整：
+
+| 取值 | 行为 |
+|---|---|
+| 不设置 / `forever` / `always` | 一直等到手机上线（默认） |
+| `0` / `never` | 只探测一次，探测不到就退出 —— 适合希望快速显式失败的脚本 |
+| `<秒数>` | 最多等这么久 |
+
+如果用了 `--device` 显式指定设备，则完全不做探测，自然也不存在等待。
+
+XDG autostart 生成的 unit 里写死了 `Restart=no`，一旦非零退出就没有人再把它拉起来，
+表现是「通知补弹无声无息地失效了，必须手动 restart」。加个 drop-in 让它自愈：
+
+```ini
+# ~/.config/systemd/user/app-kdeconnect\x2dpopup\x2dbridge@autostart.service.d/restart.conf
+[Service]
+Restart=on-failure
+RestartSec=20
+```
+
 ## 音效配置
 
 配置文件：`~/.config/kdeconnect-popup-bridge/sounds.json`（可用环境变量 `KC_BRIDGE_CONFIG` 覆盖）。

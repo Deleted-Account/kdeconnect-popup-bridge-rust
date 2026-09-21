@@ -1,6 +1,6 @@
 [package]
 name = "kdeconnect-bridge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Makes every KDE Connect phone notification actually pop up on the KDE desktop — pure Rust std, zero third-party crates"
 license = "MIT"
