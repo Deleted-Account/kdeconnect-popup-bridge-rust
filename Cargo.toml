@@ -2,7 +2,7 @@
 name = "kdeconnect-bridge"
 version = "0.1.0"
 edition = "2021"
-description = "KDE Connect 通知补弹桥接（纯 std 实现，零第三方依赖）"
+description = "Makes every KDE Connect phone notification actually pop up on the KDE desktop — pure Rust std, zero third-party crates"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Deleted-Account/kdeconnect-popup-bridge-rust"

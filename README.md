@@ -1,114 +1,138 @@
 # kdeconnect-popup-bridge
 
-> 让手机上**每一条**通知，都在 KDE 桌面上真正弹出来。
-> 纯 Rust / 纯标准库实现，**零第三方依赖**，release 二进制约 500 KB。
+**English** | [简体中文](README.zh-CN.md)
 
-## 它解决什么问题
+> Make **every** notification from your phone actually pop up on the KDE desktop.
+> Pure Rust / pure `std`, **zero third-party crates**. Release binary ≈ 500 KB.
 
-微信、东方财富这类 App 在 Android 侧会**复用同一个通知 id**：连续几条消息表现为「原地更新同一条通知」。
-KDE Connect 遇到这种情况只会更新通知历史，**不再弹窗**（很多情况下连 D-Bus 信号都不发），消息就静悄悄漏掉了。
+## The problem
 
-另一些 App（典型是行情/资讯类）把正文塞进 `ticker` 字段、`title` 只有 App 名，KDE Connect 弹出来只剩一个标题。
+Apps like WeChat and Eastmoney **reuse the same notification id** on Android: several
+messages in a row arrive as "the same notification being updated in place". When that
+happens KDE Connect only updates the notification history and **does not pop anything up**
+(often it does not even emit a D-Bus signal), so messages silently slip by.
 
-本程序直接连到 KDE Connect 的 D-Bus 接口，**订阅信号 + 轮询比对内容指纹**双管齐下，内容一变就补弹一次，并把标题与正文补全。
+Other apps (typically market/news apps) put the real content in the `ticker` field and
+leave only the app name in `title`, so KDE Connect pops up a title with no body.
 
-## 特性
+This program talks to the KDE Connect D-Bus interface directly and runs **two channels at
+once — signal subscription plus polling with content fingerprints**. Whenever the content
+changes it pops a notification, with the title and body properly filled in.
 
-- **双通道检测**：D-Bus 信号（实时）+ 轮询兜底（默认 1s），微信连续消息不发信号也能抓到
-- **内容指纹**：`(ticker, title, text)` 任一变化即视为新消息
-- **grace 抑制**（默认 2s）：很多 App 会「先发标题、几百毫秒后补正文」，grace 窗口内的更新视为同一条消息的补全，避免一条消息弹两次
-- **两种接管模式**：默认只补弹漏掉的；`--all` 连首条也接管（见下文）
-- **按 App 配置**：音效文件、弹窗停留时长、紧急度、是否启用
-- **弹窗后端可选**：`notify-send`（默认，兼容性最好）或 `native`（用本项目自带的 D-Bus 直接发 Notify，不经过 shell、不启外部进程）
-- **断线自动重连**：指数退避，最长 30s
-- **零第三方 crate**：D-Bus 线协议编解码（含 `a{sv}`、`(yv)` 嵌套签名与 8 字节对齐）和极简 JSON 解析都是自己实现的
+## Features
 
-## 环境要求
+- **Two channels**: D-Bus signals (real-time) + polling fallback (default 1s), so
+  consecutive WeChat messages that emit no signal are still caught
+- **Content fingerprint**: `(ticker, title, text)` — a change in any field counts as a new message
+- **Grace suppression** (default 2s): many apps send the title first and append the body
+  a few hundred milliseconds later. Updates inside the grace window are treated as
+  completion of the same message, so one message never becomes two popups
+- **Two takeover modes**: by default it only re-pops what KDE Connect missed; `--all`
+  takes over even the first notification (see below)
+- **Per-app rules**: sound file, popup duration, urgency, enable/disable
+- **Two popup backends**: `notify-send` (default, best compatibility) or `native`
+  (sends `Notify` straight over this project's own D-Bus layer — no shell, no external process)
+- **Auto reconnect** with exponential backoff (up to 30s)
+- **Zero dependencies**: the D-Bus wire protocol (including `a{sv}` / `(yv)` nested
+  signatures and 8-byte alignment) and the minimal JSON parser are both implemented here
 
-- Linux + KDE Plasma，手机已与 KDE Connect 配对
-- Rust 1.56+（edition 2021）—— 仅编译需要
-- `notify-send`（libnotify）—— 仅默认 `cli` 后端需要
-- `paplay`（PulseAudio / PipeWire）—— 需要音效时才用到
+## Requirements
 
-## 编译安装
+- Linux + KDE Plasma, with KDE Connect already paired to your phone
+- Rust 1.56+ (edition 2021) — build time only
+- `notify-send` (libnotify) — only for the default `cli` backend
+- `paplay` (PulseAudio / PipeWire) — only if you want sounds
+
+## Build & install
 
 ```bash
 git clone https://github.com/Deleted-Account/kdeconnect-popup-bridge-rust.git
 cd kdeconnect-popup-bridge-rust
 cargo build --release
-cp target/release/kdeconnect-popup-bridge ~/.local/bin/    # 文件名随意
+cp target/release/kdeconnect-popup-bridge ~/.local/bin/    # name it whatever you like
 ```
 
-也可以直接用 [Releases](https://github.com/Deleted-Account/kdeconnect-popup-bridge-rust/releases) 里预编译好的二进制，跳过 Rust 工具链。
+You can also grab the prebuilt binary from
+[Releases](https://github.com/Deleted-Account/kdeconnect-popup-bridge-rust/releases)
+and skip the Rust toolchain entirely.
 
-## 用法
+## Usage
 
 ```
-用法:
-  kdeconnect-popup-bridge [选项]
+Usage:
+  kdeconnect-popup-bridge [options]
 
-运行:
-      --all                 连首条通知也由本程序弹（需先关闭 KDE Connect 自带弹窗）
-      --app <名称>          只处理指定 App，可重复传参，例如 --app WeChat
-      --device <设备ID>     指定设备，可重复；默认自动探测所有在线设备
-      --interval <秒>       轮询间隔，默认 1.0
-      --grace <秒>          首条弹窗后 N 秒内不补弹，默认 2.0（避免第一条弹两次）
-      --timeout <秒>        弹窗停留秒数，默认 10
-      --notifier <后端>     cli（默认，调用 notify-send）或 native（直接发 D-Bus Notify）
-      --bus <地址>          覆盖 DBUS_SESSION_BUS_ADDRESS，例如 /run/user/1000/bus
-      --verbose             打印调试信息（含 D-Bus 属性原文）
-  -h, --help               显示本帮助
+Run:
+      --all                 Let this program pop the first notification too
+                            (requires turning off KDE Connect's own popup first)
+      --app <name>          Only handle the given app; repeatable, e.g. --app WeChat
+      --device <id>         Only handle the given device; repeatable
+                            (default: auto-detect every reachable device)
+      --interval <sec>      Polling interval, default 1.0
+      --grace <sec>         Do not re-pop within N seconds of the first popup,
+                            default 2.0 (stops the first message from popping twice)
+      --timeout <sec>       How long the popup stays, default 10
+      --notifier <backend>  cli (default, calls notify-send) or native (raw D-Bus Notify)
+      --bus <address>       Override DBUS_SESSION_BUS_ADDRESS, e.g. /run/user/1000/bus
+      --verbose             Print debug info (including raw D-Bus properties)
+  -h, --help                Show this help
 
-声音:
-      --no-sound            全部静音
-      --sound <文件>        临时音效（优先级低于按 App 的规则）
-      --set-sound <App=路径> 写入音效规则，可重复；default= 表示其他 App 静音；
-                            App= 表示删除该规则。例：--set-sound WeChat=/a/b.ogg
-      --list-sounds         打印当前规则后退出
+Sound:
+      --no-sound            Mute everything
+      --sound <file>        One-off sound (lower priority than per-app rules)
+      --set-sound <App=path>  Write a sound rule; repeatable.
+                            default= means "mute every other app";
+                            App= deletes that rule. e.g. --set-sound WeChat=/a/b.ogg
+      --list-sounds         Print the current rules and exit
 
-调试:
-      --dump                打印手机上当前的通知后退出（验证协议连通性用）
+Debug:
+      --dump                Print the notifications currently on the phone and exit
 ```
 
-`--flag value` 与 `--flag=value` 两种写法都支持。
+Both `--flag value` and `--flag=value` are accepted.
 
-## 两种工作模式
+## Two working modes
 
-**默认模式**（不改任何系统配置）：首条通知仍交给 KDE Connect 弹，本程序只补音效（KDE Connect 的弹窗不发声），并在后续内容更新时补弹。适合只想「不漏消息」的场景。
+**Default mode** (no system changes needed): the first notification is still popped by
+KDE Connect; this program only adds the sound (KDE Connect's popup is silent) and re-pops
+later content updates. Good if you just want "no missed messages".
 
-**`--all` 模式**（推荐给东方财富这类把正文藏在 `ticker` 里的 App）：
+**`--all` mode** (recommended for apps like Eastmoney that hide the body in `ticker`):
 
-1. 关闭 KDE Connect 自带的弹窗，编辑 `~/.config/kdeconnect.notifyrc`：
+1. Turn off KDE Connect's own popup by editing `~/.config/kdeconnect.notifyrc`:
 
    ```ini
    [Event/notification]
    Action=
    ```
 
-2. 用 `--all` 启动本程序，首条通知也改由本程序弹，标题取 `title`、正文取 `text` 并补上 `ticker` 里多出来的部分。
+2. Start this program with `--all`. The first notification is popped by us as well:
+   the title comes from `title`, the body from `text` plus whatever extra the `ticker` carries.
 
-## 开机自启
+## Autostart
 
-`~/.config/autostart/kdeconnect-popup-bridge.desktop`：
+`~/.config/autostart/kdeconnect-popup-bridge.desktop`:
 
 ```ini
 [Desktop Entry]
 Type=Application
-Name=KDE Connect 通知补弹
-Comment=让手机通知的每一条都在 KDE 桌面弹窗
-Exec=/home/你的用户名/.local/bin/kdeconnect-popup-bridge --all
+Name=KDE Connect notification bridge
+Comment=Make every phone notification pop up on the KDE desktop
+Exec=/home/your-user/.local/bin/kdeconnect-popup-bridge --all
 Terminal=false
 X-KDE-autostart-after=panel
 X-DBUS-StartupType=unique
 ```
 
-> 注意：`--all` 模式依赖会话总线，务必在 KDE 会话内启动（自启动或登录后再跑），不要放进 systemd --user 的早期阶段。
+> `--all` depends on the session bus, so start it inside the KDE session (autostart, or
+> after login). Don't put it in an early systemd `--user` unit.
 
-## 音效配置
+## Sound rules
 
-配置文件：`~/.config/kdeconnect-popup-bridge/sounds.json`（可用环境变量 `KC_BRIDGE_CONFIG` 覆盖）。
+Config file: `~/.config/kdeconnect-popup-bridge/sounds.json`
+(override the path with the `KC_BRIDGE_CONFIG` environment variable).
 
-字符串写法（够用）：
+String form (all most people need):
 
 ```json
 {
@@ -119,7 +143,7 @@ X-DBUS-StartupType=unique
 }
 ```
 
-对象写法（可逐 App 细调，两种写法能混用）：
+Object form (per-app fine-tuning; both forms can be mixed in one file):
 
 ```json
 {
@@ -130,48 +154,49 @@ X-DBUS-StartupType=unique
 }
 ```
 
-- `sound` 为空字符串 = 静音；`default` 决定未匹配到的 App 的行为
-- `urgency`：`low` / `normal` / `critical`
-- `enabled: false` = 直接忽略该 App
+- An empty `sound` string means mute; `default` governs every app without its own rule
+- `urgency`: `low` / `normal` / `critical`
+- `enabled: false` ignores that app entirely
 
-也可以不手改文件，用命令行写：
+You can skip editing the file and write rules from the CLI:
 
 ```bash
 kdeconnect-popup-bridge --set-sound WeChat=/path/to/a.ogg --set-sound default= --list-sounds
 ```
 
-## 工作原理
+## How it works
 
 ```text
-D-Bus 会话总线
+D-Bus session bus
   └─ org.kde.kdeconnect
-       └─ device/<id> 的 org.kde.kdeconnect.device.notifications
-            ├─ 信号：notificationPosted / Updated / Removed   ← 实时通道
-            └─ 方法：activeNotifications                      ← 轮询兜底
-                 └─ 逐条取 ticker / title / text → 算内容指纹
-                      └─ 与上次比对 → decide() 决定 弹窗 / 只放音效 / 跳过
+       └─ org.kde.kdeconnect.device.notifications on device/<id>
+            ├─ signals: notificationPosted / Updated / Removed   ← real-time channel
+            └─ method:  activeNotifications                      ← polling fallback
+                 └─ read ticker / title / text → content fingerprint
+                      └─ compare with last time → decide():
+                         popup / sound only / skip
 ```
 
-模块划分：
+Modules:
 
-| 模块 | 职责 |
+| Module | Role |
 | --- | --- |
-| `dbus::value` / `signature` / `marshal` / `unmarshal` / `message` / `Conn` | 自研 D-Bus 协议层（含 SASL EXTERNAL 认证） |
-| `json` | 极简 JSON 解析/生成，够读写配置即可 |
-| `config` | 音效规则（按 App，支持 timeout / urgency / enabled） |
-| `notify` | 弹窗后端（`notify-send` / 原生 D-Bus Notify）与播放后端（`paplay`） |
-| `bridge` | 业务状态机：内容指纹、去重、grace 抑制、弹窗与音效派发 |
-| `cli` | 命令行解析 |
+| `dbus::value` / `signature` / `marshal` / `unmarshal` / `message` / `Conn` | Hand-written D-Bus protocol layer (incl. SASL EXTERNAL auth) |
+| `json` | Minimal JSON parse/serialize, just enough for the config |
+| `config` | Sound rules per app (sound / timeout / urgency / enabled) |
+| `notify` | Popup backends (`notify-send`, native D-Bus Notify) and player backend (`paplay`) |
+| `bridge` | State machine: fingerprints, dedup, grace suppression, popup & sound dispatch |
+| `cli` | Command line parsing |
 
-## 开发
+## Development
 
 ```bash
-cargo test                    # 单元测试 + 协议测试（38+8 个，不需要真机）
-cargo test -- --ignored       # tests/live.rs：需真实 KDE Connect 会话
-cargo run -- --dump           # 打印手机当前通知，验证协议连通性
-cargo run -- --all --verbose  # 带调试信息运行
+cargo test                    # unit + protocol tests (46, no phone needed)
+cargo test -- --ignored       # tests/live.rs: needs a real KDE Connect session
+cargo run -- --dump           # print current notifications, verifies the protocol path
+cargo run -- --all --verbose  # run with debug output
 ```
 
-## 许可证
+## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT — see [LICENSE](LICENSE).
