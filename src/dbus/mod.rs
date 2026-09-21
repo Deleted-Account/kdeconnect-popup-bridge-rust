@@ -400,6 +400,14 @@ impl Conn {
     pub fn pop_signal(&mut self) -> Option<Message> {
         self.signals.pop_front()
     }
+
+    /// 把信号放回队列头部
+    ///
+    /// 等待手机的阶段也会读到信号，放回可以让这些通知不被丢弃，
+    /// 之后仍会按正常流程交给业务层处理。
+    pub fn push_signal(&mut self, msg: Message) {
+        self.signals.push_front(msg);
+    }
 }
 
 #[cfg(test)]

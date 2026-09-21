@@ -132,7 +132,9 @@ X-DBUS-StartupType=unique
 Autostart races both `kdeconnectd` and your network, so the bridge routinely starts
 before any device is reachable — the daemon hasn't finished its handshake, or the phone
 hasn't joined the same Wi-Fi yet. It therefore does **not** give up on an empty device
-list: it retries every 2s until a paired, reachable device shows up, then attaches to it.
+list: it subscribes to kdeconnectd's `deviceAdded` / `deviceVisibilityChanged` signals and
+re-probes the instant your phone comes online, with a 30s fallback probe in case those
+signals never arrive. Waiting costs nothing — no polling loop, no external process.
 Take ten minutes to connect your phone and it still starts working the moment you do.
 
 Tune this with `KC_BRIDGE_DETECT_WAIT`:

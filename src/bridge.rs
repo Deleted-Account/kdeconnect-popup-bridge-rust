@@ -24,6 +24,9 @@ pub const NOTIF_IFACE: &str = "org.kde.kdeconnect.device.notifications";
 pub const ITEM_IFACE: &str = "org.kde.kdeconnect.device.notifications.notification";
 /// 订阅 KDE Connect 通知相关的全部信号（Posted / Updated / Removed）
 pub const MATCH_RULE: &str = "type='signal',interface='org.kde.kdeconnect.device.notifications'";
+/// 订阅设备上/下线信号（`deviceAdded` / `deviceVisibilityChanged` / `deviceListChanged`），
+/// 使「手机连上了」本身成为触发条件，而不必轮询
+pub const DEVICE_MATCH_RULE: &str = "type='signal',interface='org.kde.kdeconnect.daemon'";
 
 /// 一次状态变化的来源
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,10 +289,12 @@ impl Bridge {
         let mut conn = Conn::connect(s.bus.as_deref())?;
         let name = conn.hello()?;
         conn.add_match(MATCH_RULE)?;
+        conn.add_match(DEVICE_MATCH_RULE)?;
 
         let devices = if devices_override.is_empty() {
-            // 未给 --device 时一直等到手机上线；显式指定则直接用，不必等待
-            detect_devices_waiting(DetectWait::from_env())?
+            // 未给 --device 时等到手机上线（由 deviceAdded 等信号触发）；
+            // 显式指定则直接用，不必等待
+            detect_devices_waiting(&mut conn, DetectWait::from_env())?
         } else {
             devices_override
         };
@@ -340,6 +345,7 @@ impl Bridge {
         let mut conn = Conn::connect(self.s.bus.as_deref())?;
         conn.hello()?;
         conn.add_match(MATCH_RULE)?;
+        conn.add_match(DEVICE_MATCH_RULE)?;
         self.conn = conn;
         self.state.clear();
         self.first_seen.clear();
@@ -625,8 +631,8 @@ pub fn detect_devices() -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// 探测设备的重试间隔
-pub const DETECT_INTERVAL: Duration = Duration::from_secs(2);
+/// 兜底轮询间隔：万一一个设备信号都收不到，也至少这么久主动再问一次
+pub const PROBE_FALLBACK: Duration = Duration::from_secs(30);
 /// 无限等待时每隔多久汇报一次「还在等」—— 既免得日志刷屏，也便于确认进程没卡死
 pub const DETECT_HEARTBEAT: Duration = Duration::from_secs(30);
 
@@ -672,46 +678,158 @@ impl DetectWait {
     }
 }
 
-/// 反复调用 [`detect_devices`]，直到手机上线；策略见 [`DetectWait`]。
-pub fn detect_devices_waiting(wait: DetectWait) -> Result<Vec<String>> {
-    let mut waited = Duration::ZERO;
-    let mut since_log = Duration::ZERO;
+/// 直接向 kdeconnectd 询问「已配对且在线」的设备：`devices(onlyReachable, onlyPaired)`
+///
+/// 比 fork `kdeconnect-cli` 轻得多，也不要求系统里装了那个命令 ——
+/// 设备发现本就是「等信号」的事，没必要为它反复拉起子进程。
+pub fn detect_devices_on_bus(conn: &mut Conn) -> Result<Vec<String>> {
+    let body = conn.method_call(
+        KC_DEST,
+        "/modules/kdeconnect",
+        "org.kde.kdeconnect.daemon",
+        "devices",
+        vec![Value::Bool(true), Value::Bool(true)],
+    )?;
+    match body.into_iter().next() {
+        Some(Value::Array(_, items)) => {
+            let ids: Vec<String> = items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                return Err(Error::Config(
+                    "未发现已配对且在线的设备，可用 --device 手动指定".into(),
+                ));
+            }
+            Ok(ids)
+        }
+        other => Err(Error::Protocol(format!("devices 返回异常: {other:?}"))),
+    }
+}
+
+/// 先问 kdeconnectd；它还没起来时退回 [`detect_devices`]（命令行版本）
+/// 剥掉 [`Error`] 自带的分类前缀，便于把错误嵌进另一句话里
+fn strip_kind(e: &Error) -> String {
+    match e {
+        Error::Config(msg) => msg.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// 两条探测路径都失败时合成一句话；两边说法一致就不重复啰嗦
+fn merge_probe_errors(bus_err: Error, cli_err: Error) -> Error {
+    let bus = strip_kind(&bus_err);
+    let cli = strip_kind(&cli_err);
+    if bus == cli {
+        bus_err
+    } else {
+        Error::Config(format!("{bus}；退回 kdeconnect-cli 后：{cli}"))
+    }
+}
+
+/// 两条探测路径的入口：先 D-Bus 问 kdeconnectd，失败再退回命令行版本
+fn probe_devices(conn: &mut Conn) -> Result<Vec<String>> {
+    match detect_devices_on_bus(conn) {
+        Ok(ids) => Ok(ids),
+        Err(bus_err) => detect_devices().map_err(|cli_err| merge_probe_errors(bus_err, cli_err)),
+    }
+}
+
+/// 是否 kdeconnectd 发出的「设备状态变化」信号 —— 也就是这里等的那个触发条件
+fn is_device_event(msg: &Message) -> bool {
+    msg.member.as_deref().map_or(false, |m| {
+        matches!(
+            m,
+            "deviceAdded"
+                | "deviceRemoved"
+                | "deviceVisibilityChanged"
+                | "deviceListChanged"
+        )
+    })
+}
+
+/// 按原顺序把暂存的信号放回队列，等待结束后由主循环照常处理，通知不会丢
+fn restore_parked(conn: &mut Conn, parked: Vec<Message>) {
+    for msg in parked.into_iter().rev() {
+        conn.push_signal(msg);
+    }
+}
+
+/// 等手机上线后才返回设备列表；策略见 [`DetectWait`]。
+///
+/// 不是定时轮询，而是**订阅 kdeconnectd 的设备信号**（`deviceAdded`、
+/// `deviceVisibilityChanged`、`deviceListChanged`），手机一连上就立刻重新探测。
+/// 轮询只作为收不到信号时的兜底，间隔 [`PROBE_FALLBACK`]，所以等待期间几乎不占资源。
+pub fn detect_devices_waiting(conn: &mut Conn, wait: DetectWait) -> Result<Vec<String>> {
+    let started = Instant::now();
+    let deadline = match wait {
+        DetectWait::Once => Some(started),
+        DetectWait::Limited(d) => Some(started + d),
+        DetectWait::Forever => None,
+    };
+    let mut since_log: Option<Instant> = None;
+    // 等待期间到达的信号先暂存于此（设备事件以外的信号之后还要交还给业务层）
+    let mut parked: Vec<Message> = Vec::new();
     loop {
-        let err = match detect_devices() {
+        let err = match probe_devices(conn) {
             Ok(ids) => {
-                if waited > Duration::ZERO {
+                let waited = started.elapsed();
+                if waited >= Duration::from_secs(1) {
                     eprintln!("[就绪] 发现设备，共等待 {}s", waited.as_secs());
                 }
+                restore_parked(conn, std::mem::take(&mut parked));
                 return Ok(ids);
             }
             Err(e) => e,
         };
-        // 不等，或已到时限 —— 把最后一次探测的错误交还调用方
-        if matches!(wait, DetectWait::Once)
-            || matches!(wait, DetectWait::Limited(limit) if waited >= limit)
-        {
+        // 不等，或已到时限 —— 把最后一次探测的错误连同暂存的信号一并交还
+        if matches!(deadline, Some(dl) if Instant::now() >= dl) {
+            restore_parked(conn, std::mem::take(&mut parked));
             return Err(err);
         }
-        if waited == Duration::ZERO {
+        let now = Instant::now();
+        if since_log.map_or(true, |t| now.duration_since(t) >= DETECT_HEARTBEAT) {
+            // 这里不会走到 Once —— 它在上面已经返回了
             match wait {
                 DetectWait::Forever => eprintln!(
-                    "[等待] 尚未发现已配对且在线的设备，每 {}s 重试；\
-                     会一直等到手机上线（也可用 --device 直接指定）",
-                    DETECT_INTERVAL.as_secs()
+                    "[等待] 尚未发现已配对且在线的设备；已订阅 kdeconnectd 的 deviceAdded 信号，\
+                     手机一连上就立即开始（也可用 --device 直接指定）"
                 ),
                 DetectWait::Limited(limit) => eprintln!(
-                    "[等待] 尚未发现已配对且在线的设备，每 {}s 重试，最多等待 {}s",
-                    DETECT_INTERVAL.as_secs(),
+                    "[等待] 尚未发现已配对且在线的设备，最多等待 {}s",
                     limit.as_secs()
                 ),
-                DetectWait::Once => unreachable!("Once 已在上面返回"),
+                DetectWait::Once => {}
             }
-        } else if waited - since_log >= DETECT_HEARTBEAT {
-            eprintln!("[等待] 已等待 {}s，仍在等设备上线…", waited.as_secs());
-            since_log = waited;
+            since_log = Some(now);
         }
-        std::thread::sleep(DETECT_INTERVAL);
-        waited += DETECT_INTERVAL;
+        // 阻塞等设备信号；即便一个信号都收不到也不会卡住，最多 PROBE_FALLBACK 后重新探测
+        let mut until = now + PROBE_FALLBACK;
+        if let Some(dl) = deadline {
+            until = until.min(dl);
+        }
+        loop {
+            let remain = until.saturating_duration_since(Instant::now());
+            if remain.is_zero() {
+                break;
+            }
+            match conn.next_signal(remain) {
+                Ok(Some(msg)) => {
+                    if is_device_event(&msg) {
+                        eprintln!("[事件] kdeconnectd 报告设备状态变化，立即重新探测");
+                        break;
+                    }
+                    // 其余信号（例如恰巧到达的通知）先暂存：
+                    // 不能放回队列，否则下一轮又会被读到，形成空转循环
+                    parked.push(msg);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    restore_parked(conn, std::mem::take(&mut parked));
+                    return Err(e);
+                }
+            }
+        }
     }
 }
 
