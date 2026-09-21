@@ -288,7 +288,8 @@ impl Bridge {
         conn.add_match(MATCH_RULE)?;
 
         let devices = if devices_override.is_empty() {
-            detect_devices()?
+            // 显式 --device 时不重试：用户已指定目标，等下去没有意义
+            detect_devices_waiting(DETECT_WAIT)?
         } else {
             devices_override
         };
@@ -622,6 +623,41 @@ pub fn detect_devices() -> Result<Vec<String>> {
         ));
     }
     Ok(ids)
+}
+
+/// 探测设备失败后最长重试多久
+///
+/// 开机时 XDG autostart 与 `kdeconnectd` 是并行启动的：本程序常常先跑起来，
+/// 此时守护进程还没完成设备握手，`detect_devices()` 只会拿到空列表，
+/// 于是直接以退出码 1 结束 —— 这正是「死机重启后通知补弹没起来」的根因。
+pub const DETECT_WAIT: Duration = Duration::from_secs(60);
+/// 上述重试的间隔
+pub const DETECT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 反复调用 [`detect_devices`]，直到手机上线或超过 `timeout`。
+///
+/// `timeout` 为 0 时不重试，等价于直接调用 [`detect_devices`]。
+pub fn detect_devices_waiting(timeout: Duration) -> Result<Vec<String>> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let err = match detect_devices() {
+            Ok(ids) => return Ok(ids),
+            Err(e) => e,
+        };
+        if waited >= timeout {
+            return Err(err);
+        }
+        if waited == Duration::ZERO {
+            eprintln!(
+                "[等待] 尚未发现已配对且在线的设备（kdeconnectd 可能还在初始化），\
+                 每 {}s 重试一次，最多等待 {}s",
+                DETECT_INTERVAL.as_secs(),
+                timeout.as_secs()
+            );
+        }
+        std::thread::sleep(DETECT_INTERVAL);
+        waited += DETECT_INTERVAL;
+    }
 }
 
 #[cfg(test)]
