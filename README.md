@@ -155,14 +155,45 @@ Object form (per-app fine-tuning; both forms can be mixed in one file):
 ```
 
 - An empty `sound` string means mute; `default` governs every app without its own rule
+- `timeout`: how long the popup stays, in **seconds**; decimals are fine (`2.5`).
+  When omitted it falls back to `--timeout`, then to the built-in default of 10 seconds
 - `urgency`: `low` / `normal` / `critical`
 - `enabled: false` ignores that app entirely
+
+The app key is the `appName` KDE Connect reports (matched exactly first, then
+case-insensitively). Unsure what it is? Print it: `kdeconnect-popup-bridge --dump`.
+The effective rule is `default` plus whatever the app rule overrides, so precedence is:
+
+**app rule > `default` > command line `--timeout` > built-in default of 10 seconds**
+
+Three things worth knowing:
+
+- Don't write `timeout: 0`. The freedesktop spec is inconsistent about it (`notify-send`
+  treats 0 as "expire immediately", other implementations as "never"). Omit the field to
+  get the system default
+- Combining `urgency: "critical"` with `timeout` is pointless — KDE keeps critical
+  notifications up until dismissed
+- This is **strict JSON with no comments**. A stray `//` makes the whole config invalid
+  and the program exits at startup (symptom: no bridging at all after login)
+
+The config is read once at startup, so **restart** after editing it:
+
+```bash
+systemctl --user restart 'app-kdeconnect\x2dpopup\x2dbridge@autostart.service'
+```
 
 You can skip editing the file and write rules from the CLI:
 
 ```bash
 kdeconnect-popup-bridge --set-sound WeChat=/path/to/a.ogg --set-sound default= --list-sounds
 ```
+
+> `--list-sounds` only prints sounds, not `timeout` / `urgency` — send yourself a real
+> notification to verify those two.
+
+For every other form (mixing string and object entries, `KC_BRIDGE_CONFIG`, how to find an
+app name), see `sounds.json.example.en` in this repo. That file is documentation
+— it carries comments, so don't copy it over your config.
 
 ## How it works
 

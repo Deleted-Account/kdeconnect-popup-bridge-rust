@@ -133,14 +133,38 @@ X-DBUS-StartupType=unique
 ```
 
 - `sound` 为空字符串 = 静音；`default` 决定未匹配到的 App 的行为
+- `timeout`：弹窗停留**秒数**，支持小数（如 `2.5`）；省略则回退到命令行 `--timeout`，再其次是内置默认 10 秒
 - `urgency`：`low` / `normal` / `critical`
 - `enabled: false` = 直接忽略该 App
+
+App 名填的是 KDE Connect 上报的 `appName`（先精确匹配，再忽略大小写匹配），不确定就让它打出来看：
+`kdeconnect-popup-bridge --dump`。最终取值是「`default` 打底 + App 规则逐项覆盖」，优先级为：
+
+**App 专属规则 > `default` > 命令行 `--timeout` > 内置默认 10 秒**
+
+三个容易踩的坑：
+
+- 别写 `timeout: 0`。0 的语义在 freedesktop 规范里是乱的（`notify-send` 当立即关闭，别的实现当永不过期）。想用系统默认就删掉这个字段
+- 配了 `urgency: "critical"` 就别指望 `timeout` 生效 —— KDE 不会让 critical 通知自动收起
+- 这是**严格 JSON，不支持注释**：写 `//` 或 `/* */` 会让整个配置失效、程序启动即失败（症状是开机后完全没有补弹）
+
+改完文件后**必须重启**才生效，配置只在进程启动时读一次：
+
+```bash
+systemctl --user restart 'app-kdeconnect\x2dpopup\x2dbridge@autostart.service'
+```
 
 也可以不手改文件，用命令行写：
 
 ```bash
 kdeconnect-popup-bridge --set-sound WeChat=/path/to/a.ogg --set-sound default= --list-sounds
 ```
+
+> `--list-sounds` 只显示音效，看不出 `timeout` / `urgency` —— 验证那两项请发一条真实通知。
+
+更多写法变体（含混用示例、环境变量、App 名怎么查）见仓库里的 `sounds.json.example`。
+那份是文档文件、带注释便于阅读，**不要直接 cp 成配置**。
+英文用户请改用 `sounds.json.example.en`。
 
 ## 工作原理
 

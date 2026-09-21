@@ -1,0 +1,155 @@
+// ===========================================================================
+//  sounds.json reference (all fields and every valid form)
+//  ============================= IMPORTANT =============================
+//  This is a **documentation file**. The program never reads it, which is
+//  why comments are allowed here.
+//  The real config file, sounds.json, must be strict JSON — it does NOT
+//  support comments, so copying this file straight over your config would
+//  make the bridge exit on startup with an invalid-JSON error.
+//
+//  How to use it: read the forms below, then hand-write your own
+//  ~/.config/kdeconnect-popup-bridge/sounds.json;
+//  if you'd rather copy something verbatim, use the clean JSON in the
+//  "Sound rules" section of README.md.
+//  Chinese readers see sounds.json.example.
+// ===========================================================================
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 0. Where the file goes
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   Default path: ~/.config/kdeconnect-popup-bridge/sounds.json
+//   Custom path:  set the env var KC_BRIDGE_CONFIG=/some/path.json
+//   A missing file is fine — the bridge still runs (everything muted, no app
+//   disabled) and does not complain about a first run.
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 1. Minimal form: sound only (string form)
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   Each key in apps is an app name; the value is the absolute path to a
+//   sound file. default is the fallback used when no app-specific rule matches.
+//
+//   {
+//     "apps": {
+//       "WeChat": "/home/you/Documents/sfx/mine.ogg"
+//     },
+//     "default": ""
+//   }
+//
+//   "default": ""                  ← empty string = mute every other app
+//                                    (the most common pick)
+//   "default": "/x/default.ogg"    ← every other app uses this sound
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 2. Full form: object form (per-app tuning)
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   Use an object when you need to change how long the popup stays, its
+//   urgency, or to silence an app entirely.
+//
+//   {
+//     "apps": {
+//       "WeChat":     { "sound": "/x/a.ogg",     "timeout": 30, "urgency": "normal",   "enabled": true },
+//       "StockApp":   { "sound": "/x/stock.ogg", "timeout": 20 },
+//       "Telegram":   { "sound": "",             "urgency": "critical" },
+//       "SpammyChat": { "enabled": false }
+//     },
+//     "default": { "sound": "", "timeout": 10 }
+//   }
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 3. Both forms can be mixed
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   A string value sets only the sound; an object value is a full rule. Both
+//   may live side by side in the same file:
+//
+//   {
+//     "apps": {
+//       "WeChat":   "/x/a.ogg",                            // string: sound only, rest from default
+//       "StockApp": { "sound": "/x/b.ogg", "timeout": 20 } // object: override only what you want
+//     },
+//     "default": { "sound": "", "timeout": 10 }
+//   }
+//
+//   Here WeChat plays /x/a.ogg but inherits default's timeout of 10s, while
+//   StockApp sets 20s itself and stops inheriting. The final rule is always
+//   "default as the base, app entries override field by field".
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4. Field reference
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   sound    Absolute path to the sound file.
+//            Empty string "" or omitted = this app is muted (popup only, no audio).
+//
+//   timeout  How long the popup stays, in seconds; decimals allowed (e.g. 2.5).
+//            Converted to milliseconds for notify-send --expire-time (or
+//            expire_timeout on the native D-Bus backend).
+//            Omitted falls back to the --timeout CLI flag, then to the
+//            built-in default of 10 seconds.
+//
+//   urgency  low / normal / critical. Defaults to normal.
+//            ⚠️ critical notifications never auto-dismiss in KDE, which makes
+//               timeout pointless — don't set critical if you want a timed popup.
+//
+//   enabled  false = ignore this app entirely (no popup, no sound). Defaults to true.
+//            Omitting it is fine too; { "enabled": false } exists purely to block an app.
+//
+//   Priority: app-specific rule  >  default  >  --timeout CLI flag  >  built-in 10s
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 5. What to put in the app name
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   Use the appName reported by KDE Connect — not the package name, and not
+//   the localized display name. Unsure what it actually is? Print it:
+//
+//       kdeconnect-popup-bridge --dump      # list current notifications and their apps
+//       kdeconnect-popup-bridge --verbose   # print app=... for each notification at runtime
+//
+//   Matching: an exact match is tried first, then a case-insensitive match
+//   (writing WeChat catches wechat). Non-ASCII app names are fine — JSON is
+//   UTF-8, so write them as-is.
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// 6. Gotchas
+// ───────────────────────────────────────────────────────────────────────────
+//
+//   ● Restart for changes to take effect
+//     The config is read once at process start; editing it mid-run does nothing:
+//         systemctl --user restart 'app-kdeconnect\x2dpopup\x2dbridge@autostart.service'
+//
+//   ● Never set timeout to 0
+//     0 has muddled meaning in the freedesktop spec (notify-send treats it as
+//     "close now", other implementations as "never expire").
+//     To get the system default back, just delete the timeout field.
+//
+//   ● No comments in this file
+//     The parser is strict JSON — any // or /* */ breaks the whole config and
+//     the bridge aborts with "config error". The symptom is that no
+//     notifications come through at all after boot.
+//
+//   ● Keep notes in an extra key instead of a comment
+//     load() only reads apps and default; other top-level keys are ignored
+//     without complaint, e.g.
+//         { "_memo": "WeChat uses the mining sound", "apps": {...}, "default": "" }
+//     ⚠️ But once you edit the config with --set-sound, the program rebuilds the
+//        whole file and such keys are dropped. Likewise, sound-only rules get
+//        rewritten in string form and lose their object shape.
+//
+//   ● --list-sounds shows sounds only, not timeout / urgency
+//     Verify those two by sending a real notification rather than trusting this command.
+//
+//   ● You can write rules from the CLI (no manual file editing)
+//         --set-sound WeChat=/x/a.ogg     write
+//         --set-sound WeChat=             delete this app's rule
+//         --set-sound default=            mute every other app
