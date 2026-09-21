@@ -1,0 +1,29 @@
+[package]
+name = "kdeconnect-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "KDE Connect 通知补弹桥接（纯 std 实现，零第三方依赖）"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Deleted-Account/kdeconnect-popup-bridge-rust"
+keywords = ["kde", "kdeconnect", "notification", "dbus", "linux"]
+categories = ["command-line-utilities"]
+
+# 同一份代码既作为库（便于单元测试/集成测试）又作为可执行程序
+[lib]
+name = "kdeconnect_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kdeconnect-popup-bridge"
+path = "src/main.rs"
+
+# 追求极致体积：LTO + 单代码生成单元 + 剥离符号 + panic 直接中止
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
